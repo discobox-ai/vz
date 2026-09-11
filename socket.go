@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"runtime/cgo"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -267,7 +268,20 @@ var _ net.Conn = (*VirtioSocketConnection)(nil)
 
 func newVirtioSocketConnection(ptr unsafe.Pointer) (*VirtioSocketConnection, error) {
 	vzVirtioSocketConnection := C.convertVZVirtioSocketConnection2Flat(ptr)
-	file := os.NewFile((uintptr)(vzVirtioSocketConnection.fileDescriptor), "")
+	// The VZVirtioSocketConnection owns its descriptor and closes it when the
+	// object is destroyed, so it is duplicated here, never adopted. Closing the
+	// original would let the framework's own close land on whatever descriptor
+	// reused the number in between.
+	syscall.ForkLock.RLock()
+	fd, err := syscall.Dup(int(vzVirtioSocketConnection.fileDescriptor))
+	if err == nil {
+		syscall.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		return nil, os.NewSyscallError("dup", err)
+	}
+	file := os.NewFile(uintptr(fd), "")
 	defer file.Close()
 	rawConn, err := net.FileConn(file)
 	if err != nil {
