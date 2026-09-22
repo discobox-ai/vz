@@ -10,6 +10,7 @@ package vz
 # include "virtualization_12_arm64.h"
 # include "virtualization_13_arm64.h"
 # include "virtualization_14_arm64.h"
+# include "virtualization_27_arm64.h"
 */
 import "C"
 import (
@@ -37,9 +38,79 @@ func WithStartUpFromMacOSRecovery(startInRecovery bool) VirtualMachineStartOptio
 		if err := macOSAvailable(13); err != nil {
 			return err
 		}
-		vmso.macOSVirtualMachineStartOptionsPtr = C.newVZMacOSVirtualMachineStartOptions(
+		C.setStartUpFromMacOSRecoveryVZMacOSVirtualMachineStartOptions(
+			vmso.macOSStartOptions(),
 			C.bool(startInRecovery),
 		)
+		return nil
+	}
+}
+
+// macOSStartOptions returns the one VZMacOSVirtualMachineStartOptions every
+// macOS start option writes into, creating it on first use, so that options
+// compose instead of the last one replacing the others.
+func (vmso *virtualMachineStartOptions) macOSStartOptions() unsafe.Pointer {
+	if vmso.macOSVirtualMachineStartOptionsPtr == nil {
+		vmso.macOSVirtualMachineStartOptionsPtr = C.newVZMacOSVirtualMachineStartOptions(C.bool(false))
+	}
+	return vmso.macOSVirtualMachineStartOptionsPtr
+}
+
+// MacGuestProvisioningOptions describes the account a macOS guest creates on
+// its first boot after restore, in place of Setup Assistant asking a person.
+type MacGuestProvisioningOptions struct {
+	FullName string
+	Username string
+	Password string
+	// LogsInAutomatically logs the account in at startup.
+	LogsInAutomatically bool
+	// EnablesRemoteLogin turns on Remote Login (SSH).
+	EnablesRemoteLogin bool
+}
+
+// WithMacGuestProvisioning is an option to provision a macOS guest on its
+// first boot after restore.
+//
+// Only a macOS 27 or newer guest honors it; an earlier guest ignores it. The
+// guest evaluates it once, on the first boot after restore, and the framework
+// cannot use it to reconfigure a guest that is already provisioned.
+//
+// This is only supported on macOS 27 and newer, error will
+// be returned on older versions.
+func WithMacGuestProvisioning(p MacGuestProvisioningOptions) VirtualMachineStartOption {
+	return func(vmso *virtualMachineStartOptions) error {
+		if err := macOSAvailable(27); err != nil {
+			return err
+		}
+		fullName := charWithGoString(p.FullName)
+		defer fullName.Free()
+		username := charWithGoString(p.Username)
+		defer username.Free()
+		password := charWithGoString(p.Password)
+		defer password.Free()
+
+		provisioning := objc.NewPointer(C.newVZMacGuestProvisioningOptions(
+			fullName.CString(),
+			username.CString(),
+			password.CString(),
+			C.bool(p.LogsInAutomatically),
+			C.bool(p.EnablesRemoteLogin),
+		))
+		// The start options copy the provisioning options, so this reference
+		// is ours alone to release.
+		defer objc.Release(provisioning)
+
+		nserrPtr := newNSErrorAsNil()
+		if !C.setGuestProvisioningOptionsVZMacOSVirtualMachineStartOptions(
+			vmso.macOSStartOptions(),
+			objc.Ptr(provisioning),
+			&nserrPtr,
+		) {
+			if err := newNSError(nserrPtr); err != nil {
+				return err
+			}
+			return fmt.Errorf("guest provisioning options were rejected")
+		}
 		return nil
 	}
 }
