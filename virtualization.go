@@ -155,9 +155,12 @@ func NewVirtualMachine(config *VirtualMachineConfiguration) (*VirtualMachine, er
 		config:          config,
 	}
 
+	// stateHandle is deleted by the native machine's -dealloc
+	// (deleteStateHandle), not here: the framework keeps the machine, and
+	// delivers its state changes, after this wrapper is finalized while it
+	// runs or has an operation in flight.
 	objc.SetFinalizer(v, func(self *VirtualMachine) {
 		self.finalize()
-		stateHandle.Delete()
 	})
 	return v, nil
 }
@@ -218,6 +221,11 @@ func changeStateOnObserver(newStateRaw C.int, cgoHandleUintptr C.uintptr_t) {
 	v.state = newState
 	v.stateNotify.In() <- newState
 	v.mu.Unlock()
+}
+
+//export deleteStateHandle
+func deleteStateHandle(cgoHandleUintptr C.uintptr_t) {
+	cgo.Handle(cgoHandleUintptr).Delete()
 }
 
 // State represents execution state of the virtual machine.

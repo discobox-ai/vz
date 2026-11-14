@@ -12,6 +12,7 @@
 /* exported from cgo */
 void connectionHandler(void *connection, void *err, uintptr_t cgoHandle);
 void changeStateOnObserver(int state, uintptr_t cgoHandle);
+void deleteStateHandle(uintptr_t cgoHandle);
 bool shouldAcceptNewConnectionHandler(uintptr_t cgoHandle, void *connection, void *socketDevice);
 void emitAttachmentWasDisconnected(int index, void *err, uintptr_t cgoHandle);
 void closeAttachmentWasDisconnectedChannel(uintptr_t cgoHandle);

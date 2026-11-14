@@ -102,6 +102,8 @@
 @implementation ObservableVZVirtualMachine {
     Observer *_observer;
     VZVirtualMachineDelegateWrapper *_delegateWrapper;
+    uintptr_t _statusUpdateHandle;
+    dispatch_queue_t _queue;
 };
 - (instancetype)initWithConfiguration:(VZVirtualMachineConfiguration *)configuration
                                 queue:(dispatch_queue_t)queue
@@ -109,6 +111,9 @@
 {
     self = [super initWithConfiguration:configuration queue:queue];
     if (self) {
+        _statusUpdateHandle = statusUpdateHandle;
+        _queue = queue;
+        dispatch_retain(_queue);
         _observer = [[Observer alloc] init];
         [self addObserver:_observer
                forKeyPath:@"state"
@@ -137,6 +142,16 @@
     [self removeObserver:_observer forKeyPath:@"state"];
     [_observer release];
     [_delegateWrapper release];
+    // The state handle is the observer's: it lives as long as the native
+    // machine, which the framework keeps while it runs or has work in flight,
+    // not as long as the Go wrapper. State changes arrive on the machine's
+    // serial queue, so the handle is deleted there, after any notification
+    // already queued.
+    uintptr_t handle = _statusUpdateHandle;
+    dispatch_async(_queue, ^{
+        deleteStateHandle(handle);
+    });
+    dispatch_release(_queue);
     [super dealloc];
 }
 @end
