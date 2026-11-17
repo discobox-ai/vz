@@ -7,6 +7,7 @@ package vz
 */
 import "C"
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -143,21 +144,84 @@ func connectionHandler(connPtr, errPtr unsafe.Pointer, cgoHandleUintptr C.uintpt
 //
 // For a successful connection, this method sets the sourcePort property of the resulting VZVirtioSocketConnection object to a random port number.
 // see: https://developer.apple.com/documentation/virtualization/vzvirtiosocketdevice/3656677-connecttoport?language=objc
+//
+// Connect waits for the completion handler however long it takes, and the
+// framework does not promise to call it: use ConnectContext to bound the wait.
 func (v *VirtioSocketDevice) Connect(port uint32) (*VirtioSocketConnection, error) {
-	ch := make(chan connResults, 1)
-	cgoHandle := cgo.NewHandle(func(conn *VirtioSocketConnection, err error) {
-		ch <- connResults{conn, err}
-		close(ch)
-	})
+	return v.ConnectContext(context.Background(), port)
+}
+
+// ConnectContext is Connect that returns when ctx is done.
+//
+// The framework cannot cancel a connection it has started, and it may never
+// call the completion handler: for a guest that is not listening, one that has
+// stopped answering, or a machine that has stopped. So a caller whose ctx ends
+// first gets ctx's error, and a connection that completes afterwards is closed
+// in the completion handler. A handler that never runs holds only its
+// cgo.Handle, not a goroutine.
+func (v *VirtioSocketDevice) ConnectContext(ctx context.Context, port uint32) (*VirtioSocketConnection, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	dial := newPendingDial()
+	cgoHandle := cgo.NewHandle(dial.complete)
 	C.VZVirtioSocketDevice_connectToPort(
 		objc.Ptr(v),
 		v.dispatchQueue,
 		C.uint32_t(port),
 		C.uintptr_t(cgoHandle),
 	)
-	result := <-ch
+	conn, err := dial.wait(ctx)
 	runtime.KeepAlive(v)
-	return result.conn, result.err
+	return conn, err
+}
+
+// pendingDial hands one connect's result from the completion handler to the
+// caller waiting for it, or closes the connection when that caller has gone.
+type pendingDial struct {
+	mu        sync.Mutex
+	abandoned bool
+	result    chan connResults
+}
+
+func newPendingDial() *pendingDial {
+	// Buffered, so the completion handler, which runs on the machine's
+	// dispatch queue, never waits for the caller.
+	return &pendingDial{result: make(chan connResults, 1)}
+}
+
+// complete is the completion handler: it runs at most once.
+func (d *pendingDial) complete(conn *VirtioSocketConnection, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.abandoned {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return
+	}
+	d.result <- connResults{conn, err}
+}
+
+// wait returns the connect's result, or ctx's error once ctx is done.
+func (d *pendingDial) wait(ctx context.Context) (*VirtioSocketConnection, error) {
+	select {
+	case result := <-d.result:
+		return result.conn, result.err
+	case <-ctx.Done():
+	}
+	d.mu.Lock()
+	d.abandoned = true
+	d.mu.Unlock()
+	// The handler may have delivered just before the dial was abandoned.
+	select {
+	case result := <-d.result:
+		if result.conn != nil {
+			_ = result.conn.Close()
+		}
+	default:
+	}
+	return nil, ctx.Err()
 }
 
 type connResults struct {
